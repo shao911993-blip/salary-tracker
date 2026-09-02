@@ -221,6 +221,60 @@ function monthLabel(month: string) {
   return `${year} 年 ${Number(monthIndex)} 月`;
 }
 
+type PeriodType = "month" | "quarter" | "year";
+
+function currentQuarterString(date = new Date()) {
+  return `${date.getFullYear()}-Q${Math.floor(date.getMonth() / 3) + 1}`;
+}
+
+function currentYearOnlyString(date = new Date()) {
+  return String(date.getFullYear());
+}
+
+function changeQuarter(value: string, amount: number) {
+  const [yearStr, quarterStr] = value.split("-Q");
+  let year = Number(yearStr);
+  let quarter = Number(quarterStr) + amount;
+  while (quarter < 1) {
+    quarter += 4;
+    year -= 1;
+  }
+  while (quarter > 4) {
+    quarter -= 4;
+    year += 1;
+  }
+  return `${year}-Q${quarter}`;
+}
+
+function changeYearOnly(value: string, amount: number) {
+  return String(Number(value) + amount);
+}
+
+function quarterMonthRange(value: string) {
+  const [yearStr, quarterStr] = value.split("-Q");
+  const year = Number(yearStr);
+  const quarter = Number(quarterStr);
+  const startMonth = (quarter - 1) * 3 + 1;
+  return { year, startMonth, endMonth: startMonth + 2 };
+}
+
+function recordsInPeriod(records: WorkRecord[], type: PeriodType, value: string) {
+  if (type === "month") return records.filter((record) => record.date.startsWith(value));
+  if (type === "year") return records.filter((record) => record.date.slice(0, 4) === value);
+  const { year, startMonth, endMonth } = quarterMonthRange(value);
+  return records.filter((record) => {
+    const [recordYear, recordMonth] = record.date.split("-").map(Number);
+    return recordYear === year && recordMonth >= startMonth && recordMonth <= endMonth;
+  });
+}
+
+function periodLabel(type: PeriodType, value: string) {
+  if (type === "month") return monthLabel(value);
+  if (type === "year") return `${value} 年`;
+  const [yearStr, quarterStr] = value.split("-Q");
+  return `${yearStr} 年 第 ${quarterStr} 季`;
+}
+
 function minutesBetween(start: string, end: string) {
   const [startHour, startMinute] = start.split(":").map(Number);
   const [endHour, endMinute] = end.split(":").map(Number);
@@ -588,6 +642,142 @@ function SettingsDialog({
   );
 }
 
+function HistoryDialog({
+  open,
+  onOpenChange,
+  records,
+  onEdit,
+  onDeleteRequest,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  records: WorkRecord[];
+  onEdit: (record: WorkRecord) => void;
+  onDeleteRequest: (record: WorkRecord) => void;
+}) {
+  const [periodType, setPeriodType] = useState<PeriodType>("month");
+  const [monthValue, setMonthValue] = useState(() => currentMonthString());
+  const [quarterValue, setQuarterValue] = useState(() => currentQuarterString());
+  const [yearValue, setYearValue] = useState(() => currentYearOnlyString());
+
+  const periodValue = periodType === "month" ? monthValue : periodType === "quarter" ? quarterValue : yearValue;
+
+  function shiftPeriod(amount: number) {
+    if (periodType === "month") setMonthValue((value) => changeMonth(value, amount));
+    else if (periodType === "quarter") setQuarterValue((value) => changeQuarter(value, amount));
+    else setYearValue((value) => changeYearOnly(value, amount));
+  }
+
+  function goToCurrentPeriod() {
+    setMonthValue(currentMonthString());
+    setQuarterValue(currentQuarterString());
+    setYearValue(currentYearOnlyString());
+  }
+
+  const periodRecords = useMemo(
+    () => recordsInPeriod(records, periodType, periodValue),
+    [records, periodType, periodValue],
+  );
+  const sorted = useMemo(
+    () => [...periodRecords].sort((a, b) => b.date.localeCompare(a.date) || b.createdAt.localeCompare(a.createdAt)),
+    [periodRecords],
+  );
+  const periodSummary = useMemo(
+    () => sorted.reduce(
+      (total, record) => ({
+        regularHours: total.regularHours + record.regularHours,
+        overtimeHours: total.overtimeHours + record.overtimeHours,
+        pay: total.pay + recordPay(record),
+      }),
+      { regularHours: 0, overtimeHours: 0, pay: 0 },
+    ),
+    [sorted],
+  );
+
+  const groups = useMemo(() => {
+    if (periodType === "month") return [{ label: "", items: sorted }];
+    const map = new Map<string, WorkRecord[]>();
+    sorted.forEach((record) => {
+      const key = record.date.slice(0, 7);
+      if (!map.has(key)) map.set(key, []);
+      map.get(key)!.push(record);
+    });
+    return Array.from(map.entries())
+      .sort((a, b) => b[0].localeCompare(a[0]))
+      .map(([key, items]) => ({ label: monthLabel(key), items }));
+  }, [sorted, periodType]);
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="flex h-[88vh] max-h-[88vh] flex-col sm:max-w-4xl">
+        <DialogHeader>
+          <DialogTitle>工時明細</DialogTitle>
+          <DialogDescription>選擇月、季或年，查看該期間完整的工時與薪資紀錄。</DialogDescription>
+        </DialogHeader>
+
+        <Tabs value={periodType} onValueChange={(value) => setPeriodType(value as PeriodType)}>
+          <TabsList className="grid h-11 w-full grid-cols-3 bg-slate-100 p-1">
+            <TabsTrigger value="month">月</TabsTrigger>
+            <TabsTrigger value="quarter">季</TabsTrigger>
+            <TabsTrigger value="year">年</TabsTrigger>
+          </TabsList>
+        </Tabs>
+
+        <div className="flex items-center justify-between gap-3">
+          <h3 className="text-lg font-bold">{periodLabel(periodType, periodValue)}</h3>
+          <div className="flex items-center rounded-xl border border-slate-200 bg-white p-1 shadow-sm">
+            <Button variant="ghost" size="icon-sm" aria-label="上一期" onClick={() => shiftPeriod(-1)}><ArrowLeft /></Button>
+            <Button variant="ghost" size="sm" className="hidden px-3 sm:flex" onClick={goToCurrentPeriod}>本期</Button>
+            <Button variant="ghost" size="icon-sm" aria-label="下一期" onClick={() => shiftPeriod(1)}><ArrowRight /></Button>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-3 gap-px overflow-hidden rounded-2xl border border-slate-200 bg-slate-200">
+          <div className="bg-white p-4"><p className="text-xs text-slate-500">總薪資</p><p className="mt-1 truncate text-lg font-bold">{formatCurrency(periodSummary.pay)}</p></div>
+          <div className="bg-white p-4"><p className="text-xs text-slate-500">一般工時</p><p className="mt-1 text-lg font-bold">{Number(periodSummary.regularHours.toFixed(1))} hr</p></div>
+          <div className="bg-white p-4"><p className="text-xs text-slate-500">加班</p><p className="mt-1 text-lg font-bold text-emerald-600">{Number(periodSummary.overtimeHours.toFixed(1))} hr</p></div>
+        </div>
+
+        <div className="min-h-0 flex-1 overflow-y-auto rounded-2xl border border-slate-100">
+          {sorted.length === 0 ? (
+            <div className="flex h-full min-h-40 flex-col items-center justify-center px-6 py-10 text-center text-slate-500">
+              <History className="size-6 text-slate-300" />
+              <p className="mt-3 text-sm">這段期間還沒有工時紀錄</p>
+            </div>
+          ) : (
+            groups.map((group) => (
+              <div key={group.label || "current-month"}>
+                {group.label && (
+                  <p className="sticky top-0 z-10 bg-slate-50 px-5 py-2 text-xs font-semibold text-slate-500 sm:px-6">{group.label}</p>
+                )}
+                <div className="divide-y divide-slate-100">
+                  {group.items.map((record) => (
+                    <div key={record.id} className="flex items-center gap-4 px-5 py-4 sm:px-6">
+                      <div className="grid size-11 shrink-0 place-items-center rounded-2xl bg-slate-100 text-sm font-bold text-slate-700">{Number(record.date.slice(-2))}</div>
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-2">
+                          <p className="font-semibold">{formatHours(record.regularHours + record.overtimeHours)}</p>
+                          {record.overtimeHours > 0 && <span className="rounded-full bg-amber-100 px-2 py-0.5 text-xs font-semibold text-amber-800">加班 {Number(record.overtimeHours.toFixed(2))}h</span>}
+                        </div>
+                        <p className="mt-1 truncate text-sm text-slate-500">{record.entryMode === "time" ? `${record.startTime}–${record.endTime}` : "手動輸入時數"}{record.note ? ` · ${record.note}` : ""}</p>
+                      </div>
+                      <p className="shrink-0 font-semibold tabular-nums">{formatCurrency(recordPay(record))}</p>
+                      <div className="flex shrink-0 items-center gap-1">
+                        <Button variant="ghost" size="icon-sm" aria-label={`編輯 ${record.date} 紀錄`} onClick={() => onEdit(record)}><Pencil /></Button>
+                        <Button variant="ghost" size="icon-sm" className="text-red-500 hover:bg-red-50 hover:text-red-600" aria-label={`刪除 ${record.date} 紀錄`} onClick={() => onDeleteRequest(record)}><Trash2 /></Button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ))
+          )}
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 export default function Home() {
   const [state, setState] = useState<AppState>(DEFAULT_STATE);
   const [ready, setReady] = useState(false);
@@ -596,6 +786,8 @@ export default function Home() {
   const [recordOpen, setRecordOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [clearOpen, setClearOpen] = useState(false);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState<WorkRecord | null>(null);
   const [editingRecord, setEditingRecord] = useState<WorkRecord | null>(null);
   const [clockTimes, setClockTimes] = useState<{ start: string; end: string; date: string } | null>(null);
   const [installPrompt, setInstallPrompt] = useState<Event | null>(null);
@@ -858,7 +1050,10 @@ export default function Home() {
           <article className="overflow-hidden rounded-[24px] border border-slate-200 bg-white shadow-sm">
             <div className="flex items-center justify-between border-b border-slate-100 px-5 py-5 sm:px-6">
               <div><p className="section-kicker">工時紀錄</p><h2 className="mt-1 text-lg font-bold">{sortedRecords.length ? "最近輸入" : "尚無紀錄"}</h2></div>
-              <Button variant="ghost" size="sm" onClick={() => { setEditingRecord(null); setClockTimes(null); setRecordOpen(true); }}><Plus /> 新增</Button>
+              <div className="flex items-center gap-1">
+                <Button variant="ghost" size="sm" onClick={() => setHistoryOpen(true)}><History /> 明細</Button>
+                <Button variant="ghost" size="sm" onClick={() => { setEditingRecord(null); setClockTimes(null); setRecordOpen(true); }}><Plus /> 新增</Button>
+              </div>
             </div>
 
             {sortedRecords.length === 0 ? (
@@ -869,26 +1064,36 @@ export default function Home() {
                 <Button variant="outline" className="mt-5" onClick={() => { setEditingRecord(null); setClockTimes(null); setRecordOpen(true); }}><Plus /> 新增第一筆</Button>
               </div>
             ) : (
-              <div className="divide-y divide-slate-100">
-                {sortedRecords.slice(0, 8).map((record) => (
-                  <div key={record.id} className="group flex items-center gap-4 px-5 py-4 transition hover:bg-slate-50 sm:px-6">
-                    <div className="grid size-11 shrink-0 place-items-center rounded-2xl bg-slate-100 text-sm font-bold text-slate-700">{Number(record.date.slice(-2))}</div>
-                    <div className="min-w-0 flex-1">
-                      <div className="flex items-center gap-2">
-                        <p className="font-semibold">{formatHours(record.regularHours + record.overtimeHours)}</p>
-                        {record.overtimeHours > 0 && <span className="rounded-full bg-amber-100 px-2 py-0.5 text-xs font-semibold text-amber-800">加班 {Number(record.overtimeHours.toFixed(2))}h</span>}
+              <>
+                <div className="divide-y divide-slate-100">
+                  {sortedRecords.slice(0, 3).map((record) => (
+                    <div key={record.id} className="flex items-center gap-4 px-5 py-4 transition hover:bg-slate-50 sm:px-6">
+                      <div className="grid size-11 shrink-0 place-items-center rounded-2xl bg-slate-100 text-sm font-bold text-slate-700">{Number(record.date.slice(-2))}</div>
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-2">
+                          <p className="font-semibold">{formatHours(record.regularHours + record.overtimeHours)}</p>
+                          {record.overtimeHours > 0 && <span className="rounded-full bg-amber-100 px-2 py-0.5 text-xs font-semibold text-amber-800">加班 {Number(record.overtimeHours.toFixed(2))}h</span>}
+                        </div>
+                        <p className="mt-1 truncate text-sm text-slate-500">{record.entryMode === "time" ? `${record.startTime}–${record.endTime}` : "手動輸入時數"}{record.note ? ` · ${record.note}` : ""}</p>
                       </div>
-                      <p className="mt-1 truncate text-sm text-slate-500">{record.entryMode === "time" ? `${record.startTime}–${record.endTime}` : "手動輸入時數"}{record.note ? ` · ${record.note}` : ""}</p>
+                      <p className="shrink-0 font-semibold tabular-nums">{formatCurrency(recordPay(record))}</p>
+                      <div className="flex shrink-0 items-center gap-1">
+                        <Button variant="ghost" size="icon-sm" aria-label={`編輯 ${record.date} 紀錄`} onClick={() => { setEditingRecord(record); setClockTimes(null); setRecordOpen(true); }}><Pencil /></Button>
+                        <Button variant="ghost" size="icon-sm" className="text-red-500 hover:bg-red-50 hover:text-red-600" aria-label={`刪除 ${record.date} 紀錄`} onClick={() => setDeleteTarget(record)}><Trash2 /></Button>
+                      </div>
                     </div>
-                    <p className="shrink-0 font-semibold tabular-nums">{formatCurrency(recordPay(record))}</p>
-                    <div className="hidden items-center gap-1 group-hover:flex sm:flex sm:opacity-0 sm:transition sm:group-hover:opacity-100">
-                      <Button variant="ghost" size="icon-sm" aria-label={`編輯 ${record.date} 紀錄`} onClick={() => { setEditingRecord(record); setClockTimes(null); setRecordOpen(true); }}><Pencil /></Button>
-                      <Button variant="ghost" size="icon-sm" className="text-red-500 hover:bg-red-50 hover:text-red-600" aria-label={`刪除 ${record.date} 紀錄`} onClick={() => deleteRecord(record)}><Trash2 /></Button>
-                    </div>
-                    <Button variant="ghost" size="icon-sm" className="sm:hidden" aria-label={`編輯 ${record.date} 紀錄`} onClick={() => { setEditingRecord(record); setClockTimes(null); setRecordOpen(true); }}><ChevronRight /></Button>
-                  </div>
-                ))}
-              </div>
+                  ))}
+                </div>
+                {sortedRecords.length > 3 && (
+                  <button
+                    type="button"
+                    className="flex w-full items-center justify-center gap-1 border-t border-slate-100 px-5 py-3 text-sm font-medium text-slate-500 transition hover:bg-slate-50 hover:text-slate-800 sm:px-6"
+                    onClick={() => setHistoryOpen(true)}
+                  >
+                    查看全部 {sortedRecords.length} 筆 <ChevronRight className="size-4" />
+                  </button>
+                )}
+              </>
             )}
           </article>
         </section>
@@ -934,6 +1139,16 @@ export default function Home() {
         />
       )}
 
+      {historyOpen && (
+        <HistoryDialog
+          open
+          onOpenChange={setHistoryOpen}
+          records={state.records}
+          onEdit={(record) => { setEditingRecord(record); setClockTimes(null); setRecordOpen(true); }}
+          onDeleteRequest={(record) => setDeleteTarget(record)}
+        />
+      )}
+
       <AlertDialog open={clearOpen} onOpenChange={setClearOpen}>
         <AlertDialogContent>
           <AlertDialogHeader>
@@ -943,6 +1158,29 @@ export default function Home() {
           <AlertDialogFooter>
             <AlertDialogCancel>取消</AlertDialogCancel>
             <AlertDialogAction variant="destructive" onClick={() => { setState((current) => ({ ...current, records: [] })); setSettingsOpen(false); toast.success("所有工時紀錄已清除"); }}>清除紀錄</AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog open={!!deleteTarget} onOpenChange={(open) => { if (!open) setDeleteTarget(null); }}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>刪除這筆工時紀錄？</AlertDialogTitle>
+            <AlertDialogDescription>
+              {deleteTarget ? `${deleteTarget.date} · ${formatHours(deleteTarget.regularHours + deleteTarget.overtimeHours)}，刪除後無法復原。` : ""}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>取消</AlertDialogCancel>
+            <AlertDialogAction
+              variant="destructive"
+              onClick={() => {
+                if (deleteTarget) deleteRecord(deleteTarget);
+                setDeleteTarget(null);
+              }}
+            >
+              刪除
+            </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
