@@ -662,14 +662,14 @@ export default function Home() {
 
   const weeklyBars = useMemo(() => {
     if (!selectedMonth) return [];
-    const [year, month] = selectedMonth.split("-").map(Number);
-    const days = new Date(year, month, 0).getDate();
-    const weeks = Array.from({ length: Math.ceil(days / 7) }, (_, index) => ({ label: `W${index + 1}`, hours: 0 }));
+    const labels = ["一", "二", "三", "四", "五", "六", "日"];
+    const weekdays = labels.map((label) => ({ label, hours: 0 }));
     monthlyRecords.forEach((record) => {
-      const day = Number(record.date.slice(-2));
-      weeks[Math.floor((day - 1) / 7)].hours += record.regularHours + record.overtimeHours;
+      const [year, month, day] = record.date.split("-").map(Number);
+      const weekdayIndex = (new Date(year, month - 1, day).getDay() + 6) % 7;
+      weekdays[weekdayIndex].hours += record.regularHours + record.overtimeHours;
     });
-    return weeks;
+    return weekdays;
   }, [monthlyRecords, selectedMonth]);
 
   const maxWeekHours = Math.max(1, ...weeklyBars.map((week) => week.hours));
