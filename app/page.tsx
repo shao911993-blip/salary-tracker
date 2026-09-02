@@ -376,7 +376,7 @@ function RecordDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-h-[92vh] overflow-y-auto sm:max-w-2xl">
+      <DialogContent className="max-h-[92vh] overflow-y-auto sm:max-w-4xl">
         <DialogHeader>
           <DialogTitle>{record ? "編輯工時" : clockTimes ? "確認下班紀錄" : "新增工時"}</DialogTitle>
           <DialogDescription>
@@ -395,14 +395,14 @@ function RecordDialog({
               <TabsTrigger value="hours">直接填時數</TabsTrigger>
             </TabsList>
             <TabsContent value="time" className="pt-4">
-              <div className="grid gap-5 sm:gap-6 sm:grid-cols-[minmax(140px,1fr)_minmax(140px,1fr)_112px]">
+              <div className="grid gap-8 sm:grid-cols-[minmax(160px,1fr)_minmax(160px,1fr)_130px]">
                 <div className="field-group">
                   <label className="field-label" htmlFor="start-time">上班</label>
-                  <Input id="start-time" type="time" className="min-w-[140px]" value={draft.startTime} onChange={(event) => update("startTime", event.target.value)} required />
+                  <Input id="start-time" type="time" className="min-w-[160px]" value={draft.startTime} onChange={(event) => update("startTime", event.target.value)} required />
                 </div>
                 <div className="field-group">
                   <label className="field-label" htmlFor="end-time">下班</label>
-                  <Input id="end-time" type="time" className="min-w-[140px]" value={draft.endTime} onChange={(event) => update("endTime", event.target.value)} required />
+                  <Input id="end-time" type="time" className="min-w-[160px]" value={draft.endTime} onChange={(event) => update("endTime", event.target.value)} required />
                 </div>
                 <div className="field-group">
                   <label className="field-label" htmlFor="break-minutes">休息（分鐘）</label>
