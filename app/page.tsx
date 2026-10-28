@@ -919,6 +919,12 @@ export default function Home() {
     totalHours: String(activeEstimatedHours),
   }, state.settings, state.records)) : 0;
 
+  // In the calendar, the general "新增工時" buttons add to the selected day.
+  const calendarDate = view === "calendar" && selectedDate?.startsWith(selectedMonth) ? selectedDate : null;
+  const addButtonLabel = calendarDate
+    ? `新增 ${Number(calendarDate.slice(5, 7))}/${Number(calendarDate.slice(8))} 工時`
+    : "新增工時";
+
   function openNewRecord(date: string | null = null) {
     setEditingRecord(null);
     setClockTimes(null);
@@ -1066,7 +1072,7 @@ export default function Home() {
           <div className="flex items-center gap-2">
             {installPrompt && <Button variant="outline" size="sm" className="hidden bg-white sm:flex" onClick={installApp}><Smartphone /> 安裝 App</Button>}
             <Button variant="outline" size="icon" className="bg-white" aria-label="設定" onClick={() => setSettingsOpen(true)}><Settings2 /></Button>
-            <Button className="hidden bg-slate-950 text-white hover:bg-slate-800 sm:flex" onClick={() => openNewRecord()}><Plus /> 新增工時</Button>
+            <Button className="hidden bg-slate-950 text-white hover:bg-slate-800 sm:flex" onClick={() => openNewRecord(calendarDate)}><Plus /> {addButtonLabel}</Button>
           </div>
         </div>
       </header>
@@ -1208,7 +1214,7 @@ export default function Home() {
       </div>
 
       <div className="fixed inset-x-0 bottom-0 z-20 border-t border-slate-200 bg-white/95 p-3 backdrop-blur sm:hidden">
-        <Button className="h-12 w-full bg-slate-950 text-base text-white hover:bg-slate-800" onClick={() => openNewRecord()}><Plus /> 新增工時</Button>
+        <Button className="h-12 w-full bg-slate-950 text-base text-white hover:bg-slate-800" onClick={() => openNewRecord(calendarDate)}><Plus /> {addButtonLabel}</Button>
       </div>
 
       {recordOpen && (
