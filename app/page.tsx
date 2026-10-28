@@ -59,146 +59,25 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { Toaster } from "@/components/ui/sonner";
 
-type EntryMode = "time" | "hours";
+import {
+  DEFAULT_STATE,
+  addDays,
+  draftFromRecord,
+  emptyDraft,
+  localDateString,
+  parseSettings,
+  parseState,
+  recalculateRecords,
+  recordFromDraft,
+  recordPay,
+  recordSchema,
+  recordTimeLabel,
+} from "@/lib/salary";
+import type { AppState, ClockTimes, EntryMode, RecordDraft, Settings, WorkRecord } from "@/lib/salary";
+import { stateStorage } from "@/lib/salary-storage";
 
-type Settings = {
-  hourlyRate: number;
-  defaultBreakMinutes: number;
-  defaultStart: string;
-  defaultEnd: string;
-  regularHoursPerDay: number;
-  defaultOvertimeMultiplier: number;
-};
-
-type WorkRecord = {
-  id: string;
-  date: string;
-  entryMode: EntryMode;
-  startTime: string;
-  endTime: string;
-  breakMinutes: number;
-  regularHours: number;
-  overtimeHours: number;
-  overtimeMultiplier: number;
-  hourlyRate: number;
-  allowance: number;
-  note: string;
-  createdAt: string;
-};
-
-type ActiveShift = {
-  startedAt: string;
-};
-
-type AppState = {
-  version: 1;
-  settings: Settings;
-  records: WorkRecord[];
-  activeShift: ActiveShift | null;
-};
-
-type RecordDraft = {
-  date: string;
-  entryMode: EntryMode;
-  startTime: string;
-  endTime: string;
-  breakMinutes: string;
-  totalHours: string;
-  overtimeHours: string;
-  overtimeMultiplier: string;
-  hourlyRate: string;
-  allowance: string;
-  note: string;
-};
-
-const DEFAULT_SETTINGS: Settings = {
-  hourlyRate: 200,
-  defaultBreakMinutes: 60,
-  defaultStart: "09:00",
-  defaultEnd: "18:00",
-  regularHoursPerDay: 8,
-  defaultOvertimeMultiplier: 1.34,
-};
-
-const DEFAULT_STATE: AppState = {
-  version: 1,
-  settings: DEFAULT_SETTINGS,
-  records: [],
-  activeShift: null,
-};
-
-const DB_NAME = "salary-time-tracker";
-const STORE_NAME = "app-state";
-const STATE_KEY = "main";
-const FALLBACK_KEY = "salary-time-tracker-v1";
-
-function openDatabase(): Promise<IDBDatabase> {
-  return new Promise((resolve, reject) => {
-    const request = indexedDB.open(DB_NAME, 1);
-    request.onupgradeneeded = () => {
-      if (!request.result.objectStoreNames.contains(STORE_NAME)) {
-        request.result.createObjectStore(STORE_NAME);
-      }
-    };
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error);
-  });
-}
-
-async function loadState(): Promise<AppState> {
-  try {
-    const database = await openDatabase();
-    const saved = await new Promise<AppState | undefined>((resolve, reject) => {
-      const transaction = database.transaction(STORE_NAME, "readonly");
-      const request = transaction.objectStore(STORE_NAME).get(STATE_KEY);
-      request.onsuccess = () => resolve(request.result as AppState | undefined);
-      request.onerror = () => reject(request.error);
-    });
-    database.close();
-    if (saved?.version === 1) return normalizeState(saved);
-  } catch {
-    // Some privacy modes disable IndexedDB. The localStorage mirror is a fallback.
-  }
-
-  try {
-    const fallback = localStorage.getItem(FALLBACK_KEY);
-    if (fallback) return normalizeState(JSON.parse(fallback) as AppState);
-  } catch {
-    // Ignore invalid or inaccessible fallback data.
-  }
-  return DEFAULT_STATE;
-}
-
-async function saveState(state: AppState): Promise<void> {
-  localStorage.setItem(FALLBACK_KEY, JSON.stringify(state));
-  try {
-    const database = await openDatabase();
-    await new Promise<void>((resolve, reject) => {
-      const transaction = database.transaction(STORE_NAME, "readwrite");
-      transaction.objectStore(STORE_NAME).put(state, STATE_KEY);
-      transaction.oncomplete = () => resolve();
-      transaction.onerror = () => reject(transaction.error);
-    });
-    database.close();
-  } catch {
-    // The localStorage mirror above still preserves the user's data.
-  }
-}
-
-function normalizeState(value: AppState): AppState {
-  return {
-    version: 1,
-    settings: { ...DEFAULT_SETTINGS, ...(value.settings ?? {}) },
-    records: Array.isArray(value.records) ? value.records : [],
-    activeShift: value.activeShift?.startedAt ? value.activeShift : null,
-  };
-}
-
-function localDateString(date = new Date()) {
-  const year = date.getFullYear();
-  const month = String(date.getMonth() + 1).padStart(2, "0");
-  const day = String(date.getDate()).padStart(2, "0");
-  return `${year}-${month}-${day}`;
+function saveError(error: unknown) {
+  toast.error(error instanceof Error ? error.message : "儲存失敗，請重試");
 }
 
 function localTimeString(date = new Date()) {
@@ -219,6 +98,19 @@ function monthLabel(month: string) {
   if (!month) return "載入中";
   const [year, monthIndex] = month.split("-");
   return `${year} 年 ${Number(monthIndex)} 月`;
+}
+
+const WEEKDAY_LABELS = ["日", "一", "二", "三", "四", "五", "六"];
+
+function RecordDateBadge({ date }: { date: string }) {
+  const [year, month, day] = date.split("-").map(Number);
+  const weekday = WEEKDAY_LABELS[new Date(year, month - 1, day).getDay()];
+  return (
+    <div className="flex size-12 shrink-0 flex-col items-center justify-center rounded-2xl bg-slate-100 leading-tight text-slate-700">
+      <span className="text-xs font-bold tabular-nums">{month}/{day}</span>
+      <span className="text-[11px] text-slate-500">週{weekday}</span>
+    </div>
+  );
 }
 
 type PeriodType = "month" | "quarter" | "year";
@@ -275,14 +167,6 @@ function periodLabel(type: PeriodType, value: string) {
   return `${yearStr} 年 第 ${quarterStr} 季`;
 }
 
-function minutesBetween(start: string, end: string) {
-  const [startHour, startMinute] = start.split(":").map(Number);
-  const [endHour, endMinute] = end.split(":").map(Number);
-  let difference = endHour * 60 + endMinute - (startHour * 60 + startMinute);
-  if (difference < 0) difference += 24 * 60;
-  return difference;
-}
-
 function formatCurrency(value: number) {
   return new Intl.NumberFormat("zh-TW", {
     style: "currency",
@@ -293,63 +177,6 @@ function formatCurrency(value: number) {
 
 function formatHours(value: number) {
   return `${Number(value.toFixed(2)).toLocaleString("zh-TW")} 小時`;
-}
-
-function recordPay(record: WorkRecord) {
-  return (
-    record.regularHours * record.hourlyRate +
-    record.overtimeHours * record.hourlyRate * record.overtimeMultiplier +
-    record.allowance
-  );
-}
-
-function emptyDraft(settings: Settings, mode: EntryMode = "time"): RecordDraft {
-  return {
-    date: localDateString(),
-    entryMode: mode,
-    startTime: settings.defaultStart,
-    endTime: settings.defaultEnd,
-    breakMinutes: String(settings.defaultBreakMinutes),
-    totalHours: String(settings.regularHoursPerDay),
-    overtimeHours: "",
-    overtimeMultiplier: String(settings.defaultOvertimeMultiplier),
-    hourlyRate: String(settings.hourlyRate),
-    allowance: "0",
-    note: "",
-  };
-}
-
-function draftFromRecord(record: WorkRecord): RecordDraft {
-  return {
-    date: record.date,
-    entryMode: record.entryMode,
-    startTime: record.startTime,
-    endTime: record.endTime,
-    breakMinutes: String(record.breakMinutes),
-    totalHours: String(record.regularHours + record.overtimeHours),
-    overtimeHours: String(record.overtimeHours),
-    overtimeMultiplier: String(record.overtimeMultiplier),
-    hourlyRate: String(record.hourlyRate),
-    allowance: String(record.allowance),
-    note: record.note,
-  };
-}
-
-function draftHours(draft: RecordDraft, settings: Settings) {
-  const breakMinutes = Math.max(0, Number(draft.breakMinutes) || 0);
-  const totalHours =
-    draft.entryMode === "time"
-      ? Math.max(0, (minutesBetween(draft.startTime, draft.endTime) - breakMinutes) / 60)
-      : Math.max(0, Number(draft.totalHours) || 0);
-  const enteredOvertime = draft.overtimeHours.trim();
-  const overtimeHours = enteredOvertime
-    ? Math.min(totalHours, Math.max(0, Number(enteredOvertime) || 0))
-    : Math.max(0, totalHours - settings.regularHoursPerDay);
-  return {
-    totalHours,
-    overtimeHours,
-    regularHours: Math.max(0, totalHours - overtimeHours),
-  };
 }
 
 function formatElapsed(milliseconds: number) {
@@ -371,6 +198,7 @@ function RecordDialog({
   onOpenChange,
   settings,
   record,
+  records,
   clockTimes,
   onSave,
 }: {
@@ -378,54 +206,53 @@ function RecordDialog({
   onOpenChange: (open: boolean) => void;
   settings: Settings;
   record: WorkRecord | null;
-  clockTimes: { start: string; end: string; date: string } | null;
-  onSave: (record: WorkRecord) => void;
+  records: WorkRecord[];
+  clockTimes: ClockTimes | null;
+  onSave: (record: WorkRecord) => Promise<void>;
 }) {
   const [draft, setDraft] = useState<RecordDraft>(() => {
     if (record) return draftFromRecord(record);
     const fresh = emptyDraft(settings);
     if (clockTimes) {
       fresh.date = clockTimes.date;
+      fresh.endDate = clockTimes.endDate;
       fresh.startTime = clockTimes.start;
       fresh.endTime = clockTimes.end;
     }
     return fresh;
   });
 
-  const hours = draftHours(draft, settings);
-  const hourlyRate = Math.max(0, Number(draft.hourlyRate) || 0);
-  const multiplier = Math.max(0, Number(draft.overtimeMultiplier) || 0);
-  const allowance = Number(draft.allowance) || 0;
-  const preview =
-    hours.regularHours * hourlyRate +
-    hours.overtimeHours * hourlyRate * multiplier +
-    allowance;
+  const [saving, setSaving] = useState(false);
+  const previewRecord = recordFromDraft(draft, settings, records, record);
+  const hours = { regularHours: previewRecord.regularHours, overtimeHours: previewRecord.overtimeHours };
+  const preview = recordPay(previewRecord);
 
   function update<K extends keyof RecordDraft>(key: K, value: RecordDraft[K]) {
-    setDraft((current) => ({ ...current, [key]: value }));
+    setDraft((current) => {
+      if (key === "date" && value && current.date && current.endDate) {
+        const days = Math.round((Date.parse(`${current.endDate}T00:00:00Z`) - Date.parse(`${current.date}T00:00:00Z`)) / 86_400_000);
+        return { ...current, date: value, endDate: addDays(value, days) };
+      }
+      return { ...current, [key]: value };
+    });
   }
 
-  function submit(event: FormEvent<HTMLFormElement>) {
+  async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!draft.date || hourlyRate <= 0 || hours.totalHours <= 0) {
+    if (saving) return;
+    const result = recordSchema.safeParse({ ...previewRecord, id: record?.id ?? uniqueId() });
+    if (!result.success) {
       toast.error("請確認日期、時薪與工時皆已正確填寫");
       return;
     }
-    onSave({
-      id: record?.id ?? uniqueId(),
-      date: draft.date,
-      entryMode: draft.entryMode,
-      startTime: draft.entryMode === "time" ? draft.startTime : "",
-      endTime: draft.entryMode === "time" ? draft.endTime : "",
-      breakMinutes: draft.entryMode === "time" ? Math.max(0, Number(draft.breakMinutes) || 0) : 0,
-      regularHours: hours.regularHours,
-      overtimeHours: hours.overtimeHours,
-      overtimeMultiplier: multiplier,
-      hourlyRate,
-      allowance,
-      note: draft.note.trim(),
-      createdAt: record?.createdAt ?? new Date().toISOString(),
-    });
+    setSaving(true);
+    try {
+      await onSave(result.data);
+    } catch (error) {
+      saveError(error);
+    } finally {
+      setSaving(false);
+    }
   }
 
   return (
@@ -434,7 +261,7 @@ function RecordDialog({
         <DialogHeader>
           <DialogTitle>{record ? "編輯工時" : clockTimes ? "確認下班紀錄" : "新增工時"}</DialogTitle>
           <DialogDescription>
-            加班時數留白時，會自動把每日超過 {settings.regularHoursPerDay} 小時的部分列為加班。
+            加班時數留白時，會把這筆超過 {record?.regularHoursPerDay ?? settings.regularHoursPerDay} 小時的部分列為加班，同日其他紀錄分開計算。填入數值則維持手動指定。
           </DialogDescription>
         </DialogHeader>
         <form onSubmit={submit} className="space-y-5">
@@ -450,6 +277,11 @@ function RecordDialog({
             </TabsList>
             <TabsContent value="time" className="pt-4">
               <div className="grid gap-8 sm:grid-cols-[minmax(160px,1fr)_minmax(160px,1fr)_130px]">
+                <div className="field-group sm:col-span-3">
+                  <label className="field-label" htmlFor="end-date">下班日期</label>
+                  <Input id="end-date" type="date" min={draft.date} value={draft.endDate} onChange={(event) => update("endDate", event.target.value)} required />
+                  <p className="text-xs text-slate-500">同日的下班時間早於上班時，會自動視為隔日。超過一天的班次請選擇實際下班日期。</p>
+                </div>
                 <div className="field-group">
                   <label className="field-label" htmlFor="start-time">上班</label>
                   <Input id="start-time" type="time" className="min-w-[160px]" value={draft.startTime} onChange={(event) => update("startTime", event.target.value)} required />
@@ -520,8 +352,8 @@ function RecordDialog({
           </div>
 
           <DialogFooter>
-            <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>取消</Button>
-            <Button type="submit" className="bg-emerald-500 text-slate-950 hover:bg-emerald-400"><Check /> 儲存紀錄</Button>
+            <Button type="button" variant="outline" disabled={saving} onClick={() => onOpenChange(false)}>取消</Button>
+            <Button type="submit" disabled={saving} className="bg-emerald-500 text-slate-950 hover:bg-emerald-400"><Check /> {saving ? "儲存中…" : "儲存紀錄"}</Button>
           </DialogFooter>
         </form>
       </DialogContent>
@@ -541,25 +373,30 @@ function SettingsDialog({
   open: boolean;
   onOpenChange: (open: boolean) => void;
   settings: Settings;
-  onSave: (settings: Settings) => void;
+  onSave: (settings: Settings) => Promise<void>;
   onExport: () => void;
   onImport: (file: File) => void;
   onClear: () => void;
 }) {
   const [draft, setDraft] = useState(settings);
+  const [saving, setSaving] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null);
 
   function update<K extends keyof Settings>(key: K, value: Settings[K]) {
     setDraft((current) => ({ ...current, [key]: value }));
   }
 
-  function submit(event: FormEvent<HTMLFormElement>) {
+  async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (draft.hourlyRate <= 0 || draft.regularHoursPerDay <= 0) {
-      toast.error("時薪與每日正常工時必須大於 0");
-      return;
+    if (saving) return;
+    setSaving(true);
+    try {
+      await onSave(parseSettings(draft));
+    } catch {
+      toast.error("無法儲存：請檢查設定值與瀏覽器儲存空間");
+    } finally {
+      setSaving(false);
     }
-    onSave(draft);
   }
 
   return (
@@ -634,7 +471,7 @@ function SettingsDialog({
 
           <DialogFooter>
             <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>取消</Button>
-            <Button type="submit" className="bg-slate-950 text-white hover:bg-slate-800">儲存設定</Button>
+            <Button type="submit" disabled={saving} className="bg-slate-950 text-white hover:bg-slate-800">{saving ? "儲存中…" : "儲存設定"}</Button>
           </DialogFooter>
         </form>
       </DialogContent>
@@ -753,13 +590,13 @@ function HistoryDialog({
                 <div className="divide-y divide-slate-100">
                   {group.items.map((record) => (
                     <div key={record.id} className="flex items-center gap-4 px-5 py-4 sm:px-6">
-                      <div className="grid size-11 shrink-0 place-items-center rounded-2xl bg-slate-100 text-sm font-bold text-slate-700">{Number(record.date.slice(-2))}</div>
+                      <RecordDateBadge date={record.date} />
                       <div className="min-w-0 flex-1">
                         <div className="flex items-center gap-2">
                           <p className="font-semibold">{formatHours(record.regularHours + record.overtimeHours)}</p>
                           {record.overtimeHours > 0 && <span className="rounded-full bg-amber-100 px-2 py-0.5 text-xs font-semibold text-amber-800">加班 {Number(record.overtimeHours.toFixed(2))}h</span>}
                         </div>
-                        <p className="mt-1 truncate text-sm text-slate-500">{record.entryMode === "time" ? `${record.startTime}–${record.endTime}` : "手動輸入時數"}{record.note ? ` · ${record.note}` : ""}</p>
+                        <p className="mt-1 truncate text-sm text-slate-500">{recordTimeLabel(record)}{record.note ? ` · ${record.note}` : ""}</p>
                       </div>
                       <p className="shrink-0 font-semibold tabular-nums">{formatCurrency(recordPay(record))}</p>
                       <div className="flex shrink-0 items-center gap-1">
@@ -781,6 +618,7 @@ function HistoryDialog({
 export default function Home() {
   const [state, setState] = useState<AppState>(DEFAULT_STATE);
   const [ready, setReady] = useState(false);
+  const [loadIssue, setLoadIssue] = useState<string | null>(null);
   const [selectedMonth, setSelectedMonth] = useState("");
   const [now, setNow] = useState(() => Date.now());
   const [recordOpen, setRecordOpen] = useState(false);
@@ -789,14 +627,37 @@ export default function Home() {
   const [historyOpen, setHistoryOpen] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<WorkRecord | null>(null);
   const [editingRecord, setEditingRecord] = useState<WorkRecord | null>(null);
-  const [clockTimes, setClockTimes] = useState<{ start: string; end: string; date: string } | null>(null);
+  const [clockTimes, setClockTimes] = useState<ClockTimes | null>(null);
   const [installPrompt, setInstallPrompt] = useState<Event | null>(null);
+  const currentState = useRef(DEFAULT_STATE);
+  const loaded = useRef(false);
+  const mutationQueue = useRef<Promise<void>>(Promise.resolve());
+
+  function commitState(update: (current: AppState) => AppState, replace = false): Promise<void> {
+    const operation = mutationQueue.current.then(async () => {
+      if (!loaded.current && !replace) throw new Error("原有資料尚未讀取成功，請重新整理或匯入有效備份");
+      const saved = await stateStorage.save(update(currentState.current));
+      currentState.current = saved;
+      loaded.current = true;
+      setLoadIssue(null);
+      setState(saved);
+    });
+    mutationQueue.current = operation.catch(() => undefined);
+    return operation;
+  }
 
   useEffect(() => {
     let active = true;
-    loadState().then((saved) => {
+    stateStorage.load().then((saved) => {
       if (!active) return;
+      currentState.current = saved;
+      loaded.current = true;
       setState(saved);
+      setSelectedMonth(currentMonthString());
+      setReady(true);
+    }).catch((error) => {
+      if (!active) return;
+      setLoadIssue(error instanceof Error ? error.message : "無法讀取裝置資料");
       setSelectedMonth(currentMonthString());
       setReady(true);
     });
@@ -804,12 +665,6 @@ export default function Home() {
       active = false;
     };
   }, []);
-
-  useEffect(() => {
-    if (!ready) return;
-    const timeout = window.setTimeout(() => saveState(state), 120);
-    return () => window.clearTimeout(timeout);
-  }, [state, ready]);
 
   useEffect(() => {
     if (!state.activeShift) return;
@@ -867,17 +722,19 @@ export default function Home() {
   const maxWeekHours = Math.max(1, ...weeklyBars.map((week) => week.hours));
   const elapsed = state.activeShift ? now - new Date(state.activeShift.startedAt).getTime() : 0;
   const activeEstimatedHours = state.activeShift ? Math.max(0, elapsed / 3_600_000 - state.settings.defaultBreakMinutes / 60) : 0;
-  const activeEstimatedPay =
-    Math.min(activeEstimatedHours, state.settings.regularHoursPerDay) * state.settings.hourlyRate +
-    Math.max(0, activeEstimatedHours - state.settings.regularHoursPerDay) * state.settings.hourlyRate * state.settings.defaultOvertimeMultiplier;
+  const activeEstimatedPay = state.activeShift ? recordPay(recordFromDraft({
+    ...emptyDraft(state.settings, "hours"),
+    date: localDateString(new Date(state.activeShift.startedAt)),
+    totalHours: String(activeEstimatedHours),
+  }, state.settings, state.records)) : 0;
 
-  function saveRecord(record: WorkRecord) {
-    setState((current) => ({
+  async function saveRecord(record: WorkRecord) {
+    await commitState((current) => ({
       ...current,
       activeShift: clockTimes ? null : current.activeShift,
-      records: current.records.some((item) => item.id === record.id)
+      records: recalculateRecords(current.records.some((item) => item.id === record.id)
         ? current.records.map((item) => (item.id === record.id ? record : item))
-        : [...current.records, record],
+        : [...current.records, record], current.settings.regularHoursPerDay),
     }));
     setRecordOpen(false);
     setEditingRecord(null);
@@ -886,30 +743,52 @@ export default function Home() {
     toast.success(editingRecord ? "工時紀錄已更新" : "工時紀錄已儲存");
   }
 
-  function beginShift() {
+  async function beginShift() {
     const startedAt = new Date().toISOString();
-    setState((current) => ({ ...current, activeShift: { startedAt } }));
-    setNow(Date.now());
-    toast.success("已開始計時");
+    try {
+      await commitState((current) => ({ ...current, activeShift: current.activeShift ?? { startedAt } }));
+      setNow(Date.now());
+      toast.success("已開始計時");
+    } catch (error) {
+      saveError(error);
+    }
   }
 
   function finishShift() {
     if (!state.activeShift) return;
     const start = new Date(state.activeShift.startedAt);
     const end = new Date();
-    setClockTimes({ start: localTimeString(start), end: localTimeString(end), date: localDateString(start) });
+    setClockTimes({ start: localTimeString(start), end: localTimeString(end), date: localDateString(start), endDate: localDateString(end) });
     setEditingRecord(null);
     setRecordOpen(true);
   }
 
-  function cancelShift() {
-    setState((current) => ({ ...current, activeShift: null }));
-    toast("本次計時已取消");
+  async function cancelShift() {
+    try {
+      await commitState((current) => ({ ...current, activeShift: null }));
+      toast("本次計時已取消");
+    } catch (error) {
+      saveError(error);
+    }
   }
 
-  function deleteRecord(record: WorkRecord) {
-    setState((current) => ({ ...current, records: current.records.filter((item) => item.id !== record.id) }));
-    toast.success("紀錄已刪除");
+  async function deleteRecord(record: WorkRecord) {
+    try {
+      await commitState((current) => ({ ...current, records: recalculateRecords(current.records.filter((item) => item.id !== record.id), current.settings.regularHoursPerDay) }));
+      toast.success("紀錄已刪除");
+    } catch (error) {
+      saveError(error);
+    }
+  }
+
+  async function clearRecords() {
+    try {
+      await commitState((current) => ({ ...current, records: [] }));
+      setSettingsOpen(false);
+      toast.success("所有工時紀錄已清除");
+    } catch (error) {
+      saveError(error);
+    }
   }
 
   function exportData() {
@@ -924,17 +803,20 @@ export default function Home() {
   }
 
   async function importData(file: File) {
+    let imported: AppState;
     try {
-      const value = JSON.parse(await file.text()) as AppState;
-      if (value.version !== 1 || !Array.isArray(value.records) || !value.settings) throw new Error("Invalid backup");
-      const imported = normalizeState(value);
-      setState(imported);
-      await saveState(imported);
+      imported = parseState(JSON.parse(await file.text()));
+    } catch {
+      toast.error("無法匯入：備份格式、日期或工時欄位無效，現有資料未變更");
+      return;
+    }
+    try {
+      await commitState(() => imported, true);
       setSelectedMonth(currentMonthString());
       setSettingsOpen(false);
       toast.success(`已匯入 ${imported.records.length} 筆工時紀錄`);
-    } catch {
-      toast.error("無法匯入：這不是有效的薪時記備份檔");
+    } catch (error) {
+      saveError(error);
     }
   }
 
@@ -976,6 +858,12 @@ export default function Home() {
       </header>
 
       <div className="mx-auto max-w-7xl px-4 pb-28 pt-6 sm:px-6 sm:pb-10 lg:px-8">
+        {loadIssue && (
+          <div role="alert" className="mb-5 rounded-2xl border border-red-200 bg-red-50 p-4 text-sm text-red-800">
+            <p>{loadIssue}。重新整理成功前，現有資料不會被新增或修改的操作覆蓋。</p>
+            <Button variant="outline" size="sm" className="mt-3" onClick={() => window.location.reload()}>重新讀取</Button>
+          </div>
+        )}
         <div className="mb-5 flex items-center justify-between">
           <div>
             <p className="section-kicker">本月總覽</p>
@@ -1068,13 +956,13 @@ export default function Home() {
                 <div className="divide-y divide-slate-100">
                   {sortedRecords.slice(0, 3).map((record) => (
                     <div key={record.id} className="flex items-center gap-4 px-5 py-4 transition hover:bg-slate-50 sm:px-6">
-                      <div className="grid size-11 shrink-0 place-items-center rounded-2xl bg-slate-100 text-sm font-bold text-slate-700">{Number(record.date.slice(-2))}</div>
+                      <RecordDateBadge date={record.date} />
                       <div className="min-w-0 flex-1">
                         <div className="flex items-center gap-2">
                           <p className="font-semibold">{formatHours(record.regularHours + record.overtimeHours)}</p>
                           {record.overtimeHours > 0 && <span className="rounded-full bg-amber-100 px-2 py-0.5 text-xs font-semibold text-amber-800">加班 {Number(record.overtimeHours.toFixed(2))}h</span>}
                         </div>
-                        <p className="mt-1 truncate text-sm text-slate-500">{record.entryMode === "time" ? `${record.startTime}–${record.endTime}` : "手動輸入時數"}{record.note ? ` · ${record.note}` : ""}</p>
+                        <p className="mt-1 truncate text-sm text-slate-500">{recordTimeLabel(record)}{record.note ? ` · ${record.note}` : ""}</p>
                       </div>
                       <p className="shrink-0 font-semibold tabular-nums">{formatCurrency(recordPay(record))}</p>
                       <div className="flex shrink-0 items-center gap-1">
@@ -1118,6 +1006,7 @@ export default function Home() {
           }}
           settings={state.settings}
           record={editingRecord}
+          records={state.records}
           clockTimes={clockTimes}
           onSave={saveRecord}
         />
@@ -1128,8 +1017,8 @@ export default function Home() {
           open
           onOpenChange={setSettingsOpen}
           settings={state.settings}
-          onSave={(settings) => {
-            setState((current) => ({ ...current, settings }));
+          onSave={async (settings) => {
+            await commitState((current) => ({ ...current, settings }));
             setSettingsOpen(false);
             toast.success("設定已儲存");
           }}
@@ -1157,7 +1046,7 @@ export default function Home() {
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel>取消</AlertDialogCancel>
-            <AlertDialogAction variant="destructive" onClick={() => { setState((current) => ({ ...current, records: [] })); setSettingsOpen(false); toast.success("所有工時紀錄已清除"); }}>清除紀錄</AlertDialogAction>
+            <AlertDialogAction variant="destructive" onClick={clearRecords}>清除紀錄</AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
