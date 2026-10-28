@@ -7,6 +7,7 @@ import {
   ArrowLeft,
   ArrowRight,
   Banknote,
+  CalendarDays,
   Check,
   ChevronRight,
   Clock3,
@@ -113,6 +114,26 @@ function RecordDateBadge({ date }: { date: string }) {
   );
 }
 
+function RecordRow({ record, onEdit, onDeleteRequest }: { record: WorkRecord; onEdit: () => void; onDeleteRequest: () => void }) {
+  return (
+    <div className="flex items-center gap-4 px-5 py-4 transition hover:bg-slate-50 sm:px-6">
+      <RecordDateBadge date={record.date} />
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center gap-2">
+          <p className="font-semibold">{formatHours(record.regularHours + record.overtimeHours)}</p>
+          {record.overtimeHours > 0 && <span className="rounded-full bg-amber-100 px-2 py-0.5 text-xs font-semibold text-amber-800">加班 {Number(record.overtimeHours.toFixed(2))}h</span>}
+        </div>
+        <p className="mt-1 truncate text-sm text-slate-500">{recordTimeLabel(record)}{record.note ? ` · ${record.note}` : ""}</p>
+      </div>
+      <p className="shrink-0 font-semibold tabular-nums">{formatCurrency(recordPay(record))}</p>
+      <div className="flex shrink-0 items-center gap-1">
+        <Button variant="ghost" size="icon-sm" aria-label={`編輯 ${record.date} 紀錄`} onClick={onEdit}><Pencil /></Button>
+        <Button variant="ghost" size="icon-sm" className="text-red-500 hover:bg-red-50 hover:text-red-600" aria-label={`刪除 ${record.date} 紀錄`} onClick={onDeleteRequest}><Trash2 /></Button>
+      </div>
+    </div>
+  );
+}
+
 type PeriodType = "month" | "quarter" | "year";
 
 function currentQuarterString(date = new Date()) {
@@ -179,6 +200,14 @@ function formatHours(value: number) {
   return `${Number(value.toFixed(2)).toLocaleString("zh-TW")} 小時`;
 }
 
+// Calendar cells on phones are ~45px wide, so amounts of a thousand or more
+// are shortened to "$1.6k" / "$12k".
+function formatCompactCurrency(value: number) {
+  const rounded = Math.round(value);
+  if (Math.abs(rounded) < 1000) return `$${rounded}`;
+  return `$${Number((rounded / 1000).toFixed(Math.abs(rounded) < 10_000 ? 1 : 0))}k`;
+}
+
 function formatElapsed(milliseconds: number) {
   const totalSeconds = Math.max(0, Math.floor(milliseconds / 1000));
   const hours = Math.floor(totalSeconds / 3600);
@@ -200,6 +229,7 @@ function RecordDialog({
   record,
   records,
   clockTimes,
+  initialDate,
   onSave,
 }: {
   open: boolean;
@@ -208,11 +238,16 @@ function RecordDialog({
   record: WorkRecord | null;
   records: WorkRecord[];
   clockTimes: ClockTimes | null;
+  initialDate: string | null;
   onSave: (record: WorkRecord) => Promise<void>;
 }) {
   const [draft, setDraft] = useState<RecordDraft>(() => {
     if (record) return draftFromRecord(record);
     const fresh = emptyDraft(settings);
+    if (initialDate) {
+      fresh.date = initialDate;
+      fresh.endDate = initialDate;
+    }
     if (clockTimes) {
       fresh.date = clockTimes.date;
       fresh.endDate = clockTimes.endDate;
@@ -589,21 +624,7 @@ function HistoryDialog({
                 )}
                 <div className="divide-y divide-slate-100">
                   {group.items.map((record) => (
-                    <div key={record.id} className="flex items-center gap-4 px-5 py-4 sm:px-6">
-                      <RecordDateBadge date={record.date} />
-                      <div className="min-w-0 flex-1">
-                        <div className="flex items-center gap-2">
-                          <p className="font-semibold">{formatHours(record.regularHours + record.overtimeHours)}</p>
-                          {record.overtimeHours > 0 && <span className="rounded-full bg-amber-100 px-2 py-0.5 text-xs font-semibold text-amber-800">加班 {Number(record.overtimeHours.toFixed(2))}h</span>}
-                        </div>
-                        <p className="mt-1 truncate text-sm text-slate-500">{recordTimeLabel(record)}{record.note ? ` · ${record.note}` : ""}</p>
-                      </div>
-                      <p className="shrink-0 font-semibold tabular-nums">{formatCurrency(recordPay(record))}</p>
-                      <div className="flex shrink-0 items-center gap-1">
-                        <Button variant="ghost" size="icon-sm" aria-label={`編輯 ${record.date} 紀錄`} onClick={() => onEdit(record)}><Pencil /></Button>
-                        <Button variant="ghost" size="icon-sm" className="text-red-500 hover:bg-red-50 hover:text-red-600" aria-label={`刪除 ${record.date} 紀錄`} onClick={() => onDeleteRequest(record)}><Trash2 /></Button>
-                      </div>
-                    </div>
+                    <RecordRow key={record.id} record={record} onEdit={() => onEdit(record)} onDeleteRequest={() => onDeleteRequest(record)} />
                   ))}
                 </div>
               </div>
@@ -615,11 +636,170 @@ function HistoryDialog({
   );
 }
 
+type DayTotal = { hours: number; overtimeHours: number; pay: number; records: WorkRecord[] };
+
+function CalendarView({
+  month,
+  records,
+  selectedDate,
+  onSelectDate,
+  onAdd,
+  onEdit,
+  onDeleteRequest,
+}: {
+  month: string;
+  records: WorkRecord[];
+  selectedDate: string | null;
+  onSelectDate: (date: string) => void;
+  onAdd: (date: string) => void;
+  onEdit: (record: WorkRecord) => void;
+  onDeleteRequest: (record: WorkRecord) => void;
+}) {
+  const today = localDateString();
+  const [year, monthIndex] = month.split("-").map(Number);
+  const daysInMonth = new Date(year, monthIndex, 0).getDate();
+  // Monday-first, matching the weekday chart on the overview.
+  const leadingBlanks = (new Date(year, monthIndex - 1, 1).getDay() + 6) % 7;
+  const activeDate = selectedDate?.startsWith(month) ? selectedDate : null;
+
+  const dayTotals = useMemo(() => {
+    const map = new Map<string, DayTotal>();
+    records.forEach((record) => {
+      const day = map.get(record.date) ?? { hours: 0, overtimeHours: 0, pay: 0, records: [] };
+      day.hours += record.regularHours + record.overtimeHours;
+      day.overtimeHours += record.overtimeHours;
+      day.pay += recordPay(record);
+      day.records.push(record);
+      map.set(record.date, day);
+    });
+    return map;
+  }, [records]);
+
+  const monthTotal = useMemo(
+    () => Array.from(dayTotals.values()).reduce(
+      (total, day) => ({ hours: total.hours + day.hours, pay: total.pay + day.pay }),
+      { hours: 0, pay: 0 },
+    ),
+    [dayTotals],
+  );
+
+  const activeDay = activeDate ? dayTotals.get(activeDate) : undefined;
+  const activeRecords = useMemo(
+    () => [...(activeDay?.records ?? [])].sort((a, b) =>
+      (a.entryMode === "time" ? a.startTime : "24:00").localeCompare(b.entryMode === "time" ? b.startTime : "24:00") ||
+      a.createdAt.localeCompare(b.createdAt)),
+    [activeDay],
+  );
+
+  function dayLabel(date: string) {
+    const [, m, d] = date.split("-").map(Number);
+    const weekday = WEEKDAY_LABELS[new Date(year, m - 1, d).getDay()];
+    return `${m} 月 ${d} 日（週${weekday}）`;
+  }
+
+  const cells: (string | null)[] = [
+    ...Array.from({ length: leadingBlanks }, () => null),
+    ...Array.from({ length: daysInMonth }, (_, index) => `${month}-${String(index + 1).padStart(2, "0")}`),
+  ];
+
+  return (
+    <section className="grid gap-4 lg:grid-cols-[1.45fr_0.85fr]">
+      <article className="rounded-[24px] border border-slate-200 bg-white p-3 shadow-sm sm:p-6">
+        <div className="grid grid-cols-3 gap-px overflow-hidden rounded-2xl border border-slate-200 bg-slate-200">
+          <div className="bg-white p-3 sm:p-4"><p className="text-xs text-slate-500">本月薪資</p><p className="mt-1 truncate text-base font-bold sm:text-lg">{formatCurrency(monthTotal.pay)}</p></div>
+          <div className="bg-white p-3 sm:p-4"><p className="text-xs text-slate-500">總工時</p><p className="mt-1 text-base font-bold sm:text-lg">{Number(monthTotal.hours.toFixed(1))} hr</p></div>
+          <div className="bg-white p-3 sm:p-4"><p className="text-xs text-slate-500">上班天數</p><p className="mt-1 text-base font-bold sm:text-lg">{dayTotals.size} 天</p></div>
+        </div>
+
+        <div className="mt-4 grid grid-cols-7 gap-1 text-center text-xs font-semibold text-slate-400 sm:gap-2">
+          {["一", "二", "三", "四", "五", "六", "日"].map((label) => <span key={label} className="py-1">{label}</span>)}
+        </div>
+        <div className="mt-1 grid grid-cols-7 gap-1 sm:gap-2">
+          {cells.map((date, index) => {
+            if (!date) return <div key={`blank-${index}`} />;
+            const day = dayTotals.get(date);
+            const selected = date === activeDate;
+            const isToday = date === today;
+            const label = day
+              ? `${dayLabel(date)}，${formatHours(day.hours)}，${formatCurrency(day.pay)}`
+              : `${dayLabel(date)}，沒有紀錄`;
+            return (
+              <button
+                key={date}
+                type="button"
+                aria-label={label}
+                aria-pressed={selected}
+                onClick={() => onSelectDate(date)}
+                className={`flex min-h-16 min-w-0 flex-col items-start rounded-xl px-1 py-1.5 text-left transition sm:min-h-24 sm:p-2.5 ${
+                  selected ? "bg-slate-950 text-white" : day ? "bg-emerald-50 text-slate-900 hover:bg-emerald-100" : "text-slate-700 hover:bg-slate-50"
+                } ${isToday && !selected ? "ring-2 ring-emerald-400" : ""}`}
+              >
+                <span className="text-xs font-semibold sm:text-sm">{Number(date.slice(-2))}</span>
+                {day && (
+                  <span className="mt-auto w-full min-w-0">
+                    <span className="flex items-center gap-1 text-[11px] font-semibold tabular-nums sm:text-sm">
+                      {Number(day.hours.toFixed(1))}h
+                      {day.overtimeHours > 0 && <span className="size-1.5 shrink-0 rounded-full bg-amber-400" />}
+                    </span>
+                    <span className={`block truncate text-[11px] tabular-nums sm:hidden ${selected ? "text-slate-300" : "text-emerald-700"}`}>{formatCompactCurrency(day.pay)}</span>
+                    <span className={`hidden truncate text-sm tabular-nums sm:block ${selected ? "text-slate-300" : "text-emerald-700"}`}>{formatCurrency(day.pay)}</span>
+                  </span>
+                )}
+              </button>
+            );
+          })}
+        </div>
+        <div className="mt-4 flex flex-wrap items-center gap-x-4 gap-y-1 px-1 text-xs text-slate-500">
+          <span className="flex items-center gap-1.5"><span className="size-1.5 rounded-full bg-amber-400" /> 有加班</span>
+          <span className="flex items-center gap-1.5"><span className="size-3 rounded ring-2 ring-inset ring-emerald-400" /> 今天</span>
+        </div>
+      </article>
+
+      <article className="overflow-hidden rounded-[24px] border border-slate-200 bg-white shadow-sm">
+        {activeDate ? (
+          <>
+            <div className="flex items-center justify-between border-b border-slate-100 px-5 py-5 sm:px-6">
+              <div><p className="section-kicker">當日紀錄</p><h2 className="mt-1 text-lg font-bold">{dayLabel(activeDate)}</h2></div>
+              <Button variant="ghost" size="sm" onClick={() => onAdd(activeDate)}><Plus /> 新增</Button>
+            </div>
+            {activeDay ? (
+              <>
+                <div className="grid grid-cols-2 gap-px border-b border-slate-100 bg-slate-100">
+                  <div className="bg-white px-5 py-4 sm:px-6"><p className="text-xs text-slate-500">工時</p><p className="mt-1 text-lg font-bold">{formatHours(activeDay.hours)}</p>{activeDay.overtimeHours > 0 && <p className="text-xs text-amber-700">含加班 {Number(activeDay.overtimeHours.toFixed(2))}h</p>}</div>
+                  <div className="bg-white px-5 py-4 sm:px-6"><p className="text-xs text-slate-500">當日薪資</p><p className="mt-1 text-lg font-bold text-emerald-600">{formatCurrency(activeDay.pay)}</p></div>
+                </div>
+                <div className="divide-y divide-slate-100">
+                  {activeRecords.map((record) => (
+                    <RecordRow key={record.id} record={record} onEdit={() => onEdit(record)} onDeleteRequest={() => onDeleteRequest(record)} />
+                  ))}
+                </div>
+              </>
+            ) : (
+              <div className="flex min-h-48 flex-col items-center justify-center px-6 py-10 text-center">
+                <p className="text-sm text-slate-500">這天沒有工時紀錄</p>
+                <Button variant="outline" className="mt-4" onClick={() => onAdd(activeDate)}><Plus /> 新增這天的工時</Button>
+              </div>
+            )}
+          </>
+        ) : (
+          <div className="flex min-h-48 flex-col items-center justify-center px-6 py-10 text-center">
+            <div className="grid size-14 place-items-center rounded-2xl bg-slate-100 text-slate-400"><CalendarDays className="size-6" /></div>
+            <p className="mt-4 text-sm text-slate-500">點選日期，查看當天的工時與薪資</p>
+          </div>
+        )}
+      </article>
+    </section>
+  );
+}
+
 export default function Home() {
   const [state, setState] = useState<AppState>(DEFAULT_STATE);
   const [ready, setReady] = useState(false);
   const [loadIssue, setLoadIssue] = useState<string | null>(null);
   const [selectedMonth, setSelectedMonth] = useState("");
+  const [view, setView] = useState<"overview" | "calendar">("overview");
+  const [selectedDate, setSelectedDate] = useState<string | null>(() => localDateString());
+  const [newRecordDate, setNewRecordDate] = useState<string | null>(null);
   const [now, setNow] = useState(() => Date.now());
   const [recordOpen, setRecordOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -728,6 +908,20 @@ export default function Home() {
     totalHours: String(activeEstimatedHours),
   }, state.settings, state.records)) : 0;
 
+  function openNewRecord(date: string | null = null) {
+    setEditingRecord(null);
+    setClockTimes(null);
+    setNewRecordDate(date);
+    setRecordOpen(true);
+  }
+
+  function editRecord(record: WorkRecord) {
+    setEditingRecord(record);
+    setClockTimes(null);
+    setNewRecordDate(null);
+    setRecordOpen(true);
+  }
+
   async function saveRecord(record: WorkRecord) {
     await commitState((current) => ({
       ...current,
@@ -739,7 +933,9 @@ export default function Home() {
     setRecordOpen(false);
     setEditingRecord(null);
     setClockTimes(null);
+    setNewRecordDate(null);
     setSelectedMonth(record.date.slice(0, 7));
+    setSelectedDate(record.date);
     toast.success(editingRecord ? "工時紀錄已更新" : "工時紀錄已儲存");
   }
 
@@ -760,6 +956,7 @@ export default function Home() {
     const end = new Date();
     setClockTimes({ start: localTimeString(start), end: localTimeString(end), date: localDateString(start), endDate: localDateString(end) });
     setEditingRecord(null);
+    setNewRecordDate(null);
     setRecordOpen(true);
   }
 
@@ -849,10 +1046,16 @@ export default function Home() {
               <p className="mt-1 text-xs text-slate-500">薪資與工時</p>
             </div>
           </div>
+          <Tabs value={view} onValueChange={(value) => setView(value as "overview" | "calendar")}>
+            <TabsList className="h-9 bg-slate-200/70 p-1">
+              <TabsTrigger value="overview" className="px-3">總覽</TabsTrigger>
+              <TabsTrigger value="calendar" className="px-3">日曆</TabsTrigger>
+            </TabsList>
+          </Tabs>
           <div className="flex items-center gap-2">
             {installPrompt && <Button variant="outline" size="sm" className="hidden bg-white sm:flex" onClick={installApp}><Smartphone /> 安裝 App</Button>}
             <Button variant="outline" size="icon" className="bg-white" aria-label="設定" onClick={() => setSettingsOpen(true)}><Settings2 /></Button>
-            <Button className="hidden bg-slate-950 text-white hover:bg-slate-800 sm:flex" onClick={() => { setEditingRecord(null); setClockTimes(null); setRecordOpen(true); }}><Plus /> 新增工時</Button>
+            <Button className="hidden bg-slate-950 text-white hover:bg-slate-800 sm:flex" onClick={() => openNewRecord()}><Plus /> 新增工時</Button>
           </div>
         </div>
       </header>
@@ -866,7 +1069,7 @@ export default function Home() {
         )}
         <div className="mb-5 flex items-center justify-between">
           <div>
-            <p className="section-kicker">本月總覽</p>
+            <p className="section-kicker">{view === "calendar" ? "工時日曆" : "本月總覽"}</p>
             <h1 className="mt-1 text-2xl font-bold tracking-tight sm:text-3xl">{monthLabel(selectedMonth)}</h1>
           </div>
           <div className="flex items-center rounded-xl border border-slate-200 bg-white p-1 shadow-sm">
@@ -876,6 +1079,18 @@ export default function Home() {
           </div>
         </div>
 
+        {view === "calendar" ? (
+          <CalendarView
+            month={selectedMonth}
+            records={monthlyRecords}
+            selectedDate={selectedDate}
+            onSelectDate={setSelectedDate}
+            onAdd={openNewRecord}
+            onEdit={editRecord}
+            onDeleteRequest={setDeleteTarget}
+          />
+        ) : (
+        <>
         <section className="grid gap-4 lg:grid-cols-[1.45fr_0.85fr]">
           <article className="relative overflow-hidden rounded-[28px] bg-slate-950 p-6 text-white shadow-xl shadow-slate-300/60 sm:p-8">
             <div className="absolute -right-16 -top-24 size-64 rounded-full bg-emerald-400/15 blur-3xl" />
@@ -940,7 +1155,7 @@ export default function Home() {
               <div><p className="section-kicker">工時紀錄</p><h2 className="mt-1 text-lg font-bold">{sortedRecords.length ? "最近輸入" : "尚無紀錄"}</h2></div>
               <div className="flex items-center gap-1">
                 <Button variant="ghost" size="sm" onClick={() => setHistoryOpen(true)}><History /> 明細</Button>
-                <Button variant="ghost" size="sm" onClick={() => { setEditingRecord(null); setClockTimes(null); setRecordOpen(true); }}><Plus /> 新增</Button>
+                <Button variant="ghost" size="sm" onClick={() => openNewRecord()}><Plus /> 新增</Button>
               </div>
             </div>
 
@@ -949,27 +1164,13 @@ export default function Home() {
                 <div className="grid size-14 place-items-center rounded-2xl bg-slate-100 text-slate-400"><History className="size-6" /></div>
                 <p className="mt-4 font-semibold">從第一筆工時開始</p>
                 <p className="mt-2 max-w-sm text-sm leading-6 text-slate-500">可以直接輸入時數，或記錄上下班時間讓系統自動計算。</p>
-                <Button variant="outline" className="mt-5" onClick={() => { setEditingRecord(null); setClockTimes(null); setRecordOpen(true); }}><Plus /> 新增第一筆</Button>
+                <Button variant="outline" className="mt-5" onClick={() => openNewRecord()}><Plus /> 新增第一筆</Button>
               </div>
             ) : (
               <>
                 <div className="divide-y divide-slate-100">
                   {sortedRecords.slice(0, 3).map((record) => (
-                    <div key={record.id} className="flex items-center gap-4 px-5 py-4 transition hover:bg-slate-50 sm:px-6">
-                      <RecordDateBadge date={record.date} />
-                      <div className="min-w-0 flex-1">
-                        <div className="flex items-center gap-2">
-                          <p className="font-semibold">{formatHours(record.regularHours + record.overtimeHours)}</p>
-                          {record.overtimeHours > 0 && <span className="rounded-full bg-amber-100 px-2 py-0.5 text-xs font-semibold text-amber-800">加班 {Number(record.overtimeHours.toFixed(2))}h</span>}
-                        </div>
-                        <p className="mt-1 truncate text-sm text-slate-500">{recordTimeLabel(record)}{record.note ? ` · ${record.note}` : ""}</p>
-                      </div>
-                      <p className="shrink-0 font-semibold tabular-nums">{formatCurrency(recordPay(record))}</p>
-                      <div className="flex shrink-0 items-center gap-1">
-                        <Button variant="ghost" size="icon-sm" aria-label={`編輯 ${record.date} 紀錄`} onClick={() => { setEditingRecord(record); setClockTimes(null); setRecordOpen(true); }}><Pencil /></Button>
-                        <Button variant="ghost" size="icon-sm" className="text-red-500 hover:bg-red-50 hover:text-red-600" aria-label={`刪除 ${record.date} 紀錄`} onClick={() => setDeleteTarget(record)}><Trash2 /></Button>
-                      </div>
-                    </div>
+                    <RecordRow key={record.id} record={record} onEdit={() => editRecord(record)} onDeleteRequest={() => setDeleteTarget(record)} />
                   ))}
                 </div>
                 {sortedRecords.length > 3 && (
@@ -985,6 +1186,8 @@ export default function Home() {
             )}
           </article>
         </section>
+        </>
+        )}
 
         <div className="mt-5 flex flex-wrap items-center justify-center gap-x-5 gap-y-2 text-xs text-slate-400">
           <span className="flex items-center gap-1.5"><ShieldCheck className="size-3.5" /> 資料只存在你的裝置</span>
@@ -994,7 +1197,7 @@ export default function Home() {
       </div>
 
       <div className="fixed inset-x-0 bottom-0 z-20 border-t border-slate-200 bg-white/95 p-3 backdrop-blur sm:hidden">
-        <Button className="h-12 w-full bg-slate-950 text-base text-white hover:bg-slate-800" onClick={() => { setEditingRecord(null); setClockTimes(null); setRecordOpen(true); }}><Plus /> 新增工時</Button>
+        <Button className="h-12 w-full bg-slate-950 text-base text-white hover:bg-slate-800" onClick={() => openNewRecord()}><Plus /> 新增工時</Button>
       </div>
 
       {recordOpen && (
@@ -1002,12 +1205,13 @@ export default function Home() {
           open
           onOpenChange={(open) => {
             setRecordOpen(open);
-            if (!open) { setEditingRecord(null); setClockTimes(null); }
+            if (!open) { setEditingRecord(null); setClockTimes(null); setNewRecordDate(null); }
           }}
           settings={state.settings}
           record={editingRecord}
           records={state.records}
           clockTimes={clockTimes}
+          initialDate={newRecordDate}
           onSave={saveRecord}
         />
       )}
@@ -1033,7 +1237,7 @@ export default function Home() {
           open
           onOpenChange={setHistoryOpen}
           records={state.records}
-          onEdit={(record) => { setEditingRecord(record); setClockTimes(null); setRecordOpen(true); }}
+          onEdit={editRecord}
           onDeleteRequest={(record) => setDeleteTarget(record)}
         />
       )}
