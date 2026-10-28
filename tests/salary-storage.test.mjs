@@ -117,6 +117,64 @@ test("fresh storage loads defaults, while inaccessible storage reports an error"
   await assert.rejects(createStateStorage([a, b]).load());
 });
 
+const makeRecord = (id) => ({
+  id, date: "2026-10-28", entryMode: "hours", startTime: "", endTime: "", breakMinutes: 0,
+  regularHours: 8, overtimeHours: 0, overtimeMode: "auto", regularHoursPerDay: 8, overtimeMultiplier: 1.34,
+  hourlyRate: 200, allowance: 0, note: "", createdAt: "2026-10-28T01:00:00.000Z",
+});
+const addRecord = (id) => (current) => ({ ...current, records: [...current.records, makeRecord(id)] });
+
+// Stands in for Web Locks: one queue shared by every "tab".
+function sharedLock() {
+  let tail = Promise.resolve();
+  return (run) => {
+    const result = tail.then(run);
+    tail = result.catch(() => undefined);
+    return result;
+  };
+}
+
+test("two tabs that loaded the same data both keep their new records", async () => {
+  const backends = [backend(), backend()];
+  const tabA = createStateStorage(backends);
+  const tabB = createStateStorage(backends);
+  const knownA = await tabA.load();
+  const knownB = await tabB.load();
+  await tabA.update(addRecord("from-a"), knownA);
+  await tabB.update(addRecord("from-b"), knownB);
+  const final = await createStateStorage(backends).load();
+  assert.deepEqual(final.records.map((record) => record.id), ["from-a", "from-b"]);
+});
+
+test("simultaneous saves from two tabs are serialised by the shared lock", async () => {
+  const backends = [backend(), backend()];
+  const lock = sharedLock();
+  const tabA = createStateStorage(backends, lock);
+  const tabB = createStateStorage(backends, lock);
+  const [knownA, knownB] = await Promise.all([tabA.load(), tabB.load()]);
+  await Promise.all([tabA.update(addRecord("from-a"), knownA), tabB.update(addRecord("from-b"), knownB)]);
+  const final = await createStateStorage(backends).load();
+  assert.deepEqual(final.records.map((record) => record.id).sort(), ["from-a", "from-b"]);
+});
+
+test("a tab keeps its records when storage was cleared underneath it", async () => {
+  const backends = [backend(), backend()];
+  const tab = createStateStorage(backends);
+  const known = await tab.update(addRecord("kept"), await tab.load());
+  backends[0].value = backends[1].value = null;
+  const saved = await tab.update(addRecord("new"), known);
+  assert.deepEqual(saved.records.map((record) => record.id), ["kept", "new"]);
+});
+
+test("an import replaces stored data instead of merging into it", async () => {
+  const backends = [backend(), backend()];
+  const tab = createStateStorage(backends);
+  await tab.update(addRecord("old"), await tab.load());
+  const saved = await tab.replace({ ...DEFAULT_STATE, records: [makeRecord("imported")] });
+  assert.deepEqual(saved.records.map((record) => record.id), ["imported"]);
+  assert.deepEqual((await createStateStorage(backends).load()).records.map((record) => record.id), ["imported"]);
+});
+
 test("corrupt data is not silently treated as a new empty account", async () => {
   const corrupt = backend({ ...DEFAULT_STATE, records: [null] });
   await assert.rejects(createStateStorage([corrupt, backend()]).load());

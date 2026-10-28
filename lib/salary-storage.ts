@@ -71,10 +71,33 @@ const localStorageBackend: StateBackend = {
   },
 };
 
-export function createStateStorage(backends: StateBackend[] = [localStorageBackend, indexedDBBackend]) {
+export type StateLock = <T>(run: () => Promise<T>) => Promise<T>;
+
+// Web Locks serialise writes across every tab of this origin. Browsers without
+// it fall back to no lock; re-reading before each write still narrows the gap.
+const browserLock: StateLock = <T,>(run: () => Promise<T>) =>
+  typeof navigator !== "undefined" && navigator.locks
+    // request() resolves with the callback's own result, so Promise<T> here.
+    ? (navigator.locks.request("salary-time-tracker-write", run) as Promise<T>)
+    : run();
+
+const CHANNEL_NAME = "salary-time-tracker";
+
+// A short-lived channel, so nothing stays open (and test runs can exit).
+function notifyOtherTabs(updatedAt: number) {
+  if (typeof BroadcastChannel === "undefined") return;
+  const channel = new BroadcastChannel(CHANNEL_NAME);
+  channel.postMessage(updatedAt);
+  channel.close();
+}
+
+export function createStateStorage(
+  backends: StateBackend[] = [localStorageBackend, indexedDBBackend],
+  withLock: StateLock = browserLock,
+) {
   let lastUpdatedAt = 0;
   let pending: Promise<unknown> = Promise.resolve();
-  return {
+  const storage = {
     async load(): Promise<AppState> {
       let invalidSnapshot = false;
       const results = await Promise.allSettled(backends.map(async (backend) => {
@@ -115,12 +138,43 @@ export function createStateStorage(backends: StateBackend[] = [localStorageBacke
           throw new Error("儲存失敗：請檢查瀏覽器儲存權限或可用空間後重試");
         }
         lastUpdatedAt = snapshot.updatedAt;
+        notifyOtherTabs(snapshot.updatedAt);
         return snapshot;
       });
       pending = operation.catch(() => undefined);
       return operation;
     },
+    // Another tab may have saved since this one loaded, so each change is
+    // applied to the newest stored copy rather than to this tab's memory.
+    // `known` is this tab's copy; it wins only when storage holds something
+    // older (e.g. site data was cleared while the tab stayed open).
+    update(change: (current: AppState) => AppState, known: AppState): Promise<AppState> {
+      return withLock(async () => {
+        let stored: AppState | null = null;
+        try {
+          stored = await storage.load();
+        } catch {
+          // Unreadable storage: fall back to the copy this tab already has.
+        }
+        const base = stored && stored.updatedAt >= known.updatedAt ? stored : known;
+        return storage.save(change(base));
+      });
+    },
+    // Imports replace everything, so there is nothing to re-read first.
+    replace(state: AppState): Promise<AppState> {
+      return withLock(() => storage.save(state));
+    },
+    // Calls `onChange` with the newest stored state whenever another tab saves.
+    subscribe(onChange: (state: AppState) => void): () => void {
+      if (typeof BroadcastChannel === "undefined") return () => undefined;
+      const listener = new BroadcastChannel(CHANNEL_NAME);
+      listener.onmessage = () => {
+        storage.load().then(onChange).catch(() => undefined);
+      };
+      return () => listener.close();
+    },
   };
+  return storage;
 }
 
 export const stateStorage = createStateStorage();

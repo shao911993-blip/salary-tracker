@@ -816,7 +816,9 @@ export default function Home() {
   function commitState(update: (current: AppState) => AppState, replace = false): Promise<void> {
     const operation = mutationQueue.current.then(async () => {
       if (!loaded.current && !replace) throw new Error("原有資料尚未讀取成功，請重新整理或匯入有效備份");
-      const saved = await stateStorage.save(update(currentState.current));
+      const saved = replace
+        ? await stateStorage.replace(update(currentState.current))
+        : await stateStorage.update(update, currentState.current);
       currentState.current = saved;
       loaded.current = true;
       setLoadIssue(null);
@@ -845,6 +847,15 @@ export default function Home() {
       active = false;
     };
   }, []);
+
+  // Keep this tab in step when another tab (or the installed app) saves.
+  useEffect(() => stateStorage.subscribe((latest) => {
+    if (loaded.current && latest.updatedAt <= currentState.current.updatedAt) return;
+    currentState.current = latest;
+    loaded.current = true;
+    setLoadIssue(null);
+    setState(latest);
+  }), []);
 
   useEffect(() => {
     if (!state.activeShift) return;
