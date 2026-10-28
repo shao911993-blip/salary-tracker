@@ -76,6 +76,7 @@ import {
 } from "@/lib/salary";
 import type { AppState, ClockTimes, EntryMode, RecordDraft, Settings, WorkRecord } from "@/lib/salary";
 import { stateStorage } from "@/lib/salary-storage";
+import { dayTotals as monthDayTotals, formatCompactCurrency, monthCells, sortDayRecords } from "@/lib/calendar";
 
 function saveError(error: unknown) {
   toast.error(error instanceof Error ? error.message : "儲存失敗，請重試");
@@ -198,14 +199,6 @@ function formatCurrency(value: number) {
 
 function formatHours(value: number) {
   return `${Number(value.toFixed(2)).toLocaleString("zh-TW")} 小時`;
-}
-
-// Calendar cells on phones are ~45px wide, so amounts of a thousand or more
-// are shortened to "$1.6k" / "$12k".
-function formatCompactCurrency(value: number) {
-  const rounded = Math.round(value);
-  if (Math.abs(rounded) < 1000) return `$${rounded}`;
-  return `$${Number((rounded / 1000).toFixed(Math.abs(rounded) < 10_000 ? 1 : 0))}k`;
 }
 
 function formatElapsed(milliseconds: number) {
@@ -636,8 +629,6 @@ function HistoryDialog({
   );
 }
 
-type DayTotal = { hours: number; overtimeHours: number; pay: number; records: WorkRecord[] };
-
 function CalendarView({
   month,
   records,
@@ -656,24 +647,9 @@ function CalendarView({
   onDeleteRequest: (record: WorkRecord) => void;
 }) {
   const today = localDateString();
-  const [year, monthIndex] = month.split("-").map(Number);
-  const daysInMonth = new Date(year, monthIndex, 0).getDate();
-  // Monday-first, matching the weekday chart on the overview.
-  const leadingBlanks = (new Date(year, monthIndex - 1, 1).getDay() + 6) % 7;
+  const year = Number(month.slice(0, 4));
   const activeDate = selectedDate?.startsWith(month) ? selectedDate : null;
-
-  const dayTotals = useMemo(() => {
-    const map = new Map<string, DayTotal>();
-    records.forEach((record) => {
-      const day = map.get(record.date) ?? { hours: 0, overtimeHours: 0, pay: 0, records: [] };
-      day.hours += record.regularHours + record.overtimeHours;
-      day.overtimeHours += record.overtimeHours;
-      day.pay += recordPay(record);
-      day.records.push(record);
-      map.set(record.date, day);
-    });
-    return map;
-  }, [records]);
+  const dayTotals = useMemo(() => monthDayTotals(records, month), [records, month]);
 
   const monthTotal = useMemo(
     () => Array.from(dayTotals.values()).reduce(
@@ -684,12 +660,7 @@ function CalendarView({
   );
 
   const activeDay = activeDate ? dayTotals.get(activeDate) : undefined;
-  const activeRecords = useMemo(
-    () => [...(activeDay?.records ?? [])].sort((a, b) =>
-      (a.entryMode === "time" ? a.startTime : "24:00").localeCompare(b.entryMode === "time" ? b.startTime : "24:00") ||
-      a.createdAt.localeCompare(b.createdAt)),
-    [activeDay],
-  );
+  const activeRecords = useMemo(() => sortDayRecords(activeDay?.records ?? []), [activeDay]);
 
   function dayLabel(date: string) {
     const [, m, d] = date.split("-").map(Number);
@@ -697,10 +668,7 @@ function CalendarView({
     return `${m} 月 ${d} 日（週${weekday}）`;
   }
 
-  const cells: (string | null)[] = [
-    ...Array.from({ length: leadingBlanks }, () => null),
-    ...Array.from({ length: daysInMonth }, (_, index) => `${month}-${String(index + 1).padStart(2, "0")}`),
-  ];
+  const cells = monthCells(month);
 
   return (
     <section className="grid gap-4 lg:grid-cols-[1.45fr_0.85fr]">
